@@ -7,11 +7,13 @@ sentry.templatetags.sentry_activity
 """
 from __future__ import absolute_import
 
+import logging
+
 from django import template
 from django.utils.html import escape, urlize, linebreaks
 from django.utils.safestring import mark_safe
 
-from sentry.models import Activity
+from sentry.models import Activity, User
 from sentry.templatetags.sentry_helpers import timesince
 from sentry.utils.avatar import get_gravatar_url
 
@@ -28,6 +30,9 @@ ACTIVITY_ACTION_STRINGS = {
     Activity.SET_REGRESSION: 'marked this event as a regression',
     Activity.CREATE_ISSUE: u'created an issue on {provider:s} titled <a href="{location:s}">{title:s}</a>',
     Activity.FIRST_SEEN: 'first saw this event',
+    Activity.ASSIGNED: 'assigned this event to {user:s}',
+    Activity.UNASSIGNED: 'unassigned this event',
+    Activity.RELEASE: 'saw a new release: {version:s}',
 }
 
 
@@ -37,16 +42,31 @@ def render_activity(item):
         # not implemented
         return
 
-    action_str = ACTIVITY_ACTION_STRINGS[item.type]
+    try:
+        action_str = ACTIVITY_ACTION_STRINGS[item.type]
+    except KeyError:
+        logging.warning('Unknown activity type present: %s', item.type)
+        return
 
     if item.type == Activity.CREATE_ISSUE:
         action_str = action_str.format(**item.data)
+    elif item.type == Activity.ASSIGNED:
+        if item.data['assignee'] == item.user_id:
+            assignee_name = 'themselves'
+        else:
+            try:
+                assignee = User.objects.get(id=item.data['assignee'])
+            except User.DoesNotExist:
+                assignee_name = 'unknown'
+            else:
+                assignee_name = assignee.get_display_name()
+        action_str = action_str.format(user=assignee_name)
 
     output = ''
 
     if item.user:
         user = item.user
-        name = user.first_name or user.email
+        name = user.name or user.email
         output += '<span class="avatar"><img src="%s"></span> ' % (get_gravatar_url(user.email, size=20),)
         output += '<strong>%s</strong> %s' % (escape(name), action_str)
     else:

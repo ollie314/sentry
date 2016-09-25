@@ -39,15 +39,17 @@ requires_cassandra = pytest.mark.skipif(
     reason="requires cassandra server running")
 
 
-def elastic_search_is_available():
+def has_llvm_symbolizer():
     try:
-        socket.create_connection(('127.0.0.1', 9200), 1.0)
-    except socket.error:
+        from symsynd.driver import find_llvm_symbolizer
+    except ImportError:
         return False
-    else:
-        return True
 
+    try:
+        return find_llvm_symbolizer() is not None
+    except EnvironmentError:
+        return False
 
-requires_elastic_search = pytest.mark.skipif(
-    not elastic_search_is_available(),
-    reason="requires elastic search server running")
+requires_llvm_symbolizer = pytest.mark.skipif(
+    not has_llvm_symbolizer(),
+    reason="requires llvm symbolizer")

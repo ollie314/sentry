@@ -8,60 +8,177 @@ from django.contrib.auth.forms import (
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.http import Http404, HttpResponseRedirect
-from django.utils.safestring import mark_safe
-from django.utils.html import escape
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.debug import sensitive_post_parameters
 from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
 from django.utils.translation import ugettext, ugettext_lazy as _
-
-from sentry.models import Broadcast, Project, Team, TeamMember, User
+from pprint import saferepr
+from sentry.models import (
+    ApiKey, AuthIdentity, AuthProvider, AuditLogEntry, Broadcast,
+    Option, Organization, OrganizationMember, OrganizationMemberTeam, Project,
+    Team, User
+)
+from sentry.utils.html import escape
 
 csrf_protect_m = method_decorator(csrf_protect)
 sensitive_post_parameters_m = method_decorator(sensitive_post_parameters())
 
 
 class BroadcastAdmin(admin.ModelAdmin):
-    list_display = ('message', 'is_active', 'date_added')
+    list_display = ('title', 'message', 'is_active', 'date_added')
     list_filter = ('is_active',)
-    search_fields = ('message', 'url')
+    search_fields = ('title', 'message', 'link')
+    readonly_fields = ('upstream_id', 'date_added')
 
 admin.site.register(Broadcast, BroadcastAdmin)
 
 
-class ProjectAdmin(admin.ModelAdmin):
-    list_display = ('full_slug', 'owner', 'platform', 'status', 'date_added')
-    list_filter = ('status', 'platform', 'public')
-    search_fields = ('name', 'owner__username', 'owner__email', 'team__slug',
-                     'team__name', 'slug')
-    raw_id_fields = ('owner', 'team')
+class OptionAdmin(admin.ModelAdmin):
+    list_display = ('key', 'last_updated')
+    fields = ('key', 'value_repr', 'last_updated')
+    readonly_fields = ('key', 'value_repr', 'last_updated')
+    search_fields = ('key',)
 
-    def full_slug(self, instance):
-        if not instance.team:
-            slug = instance.slug
-        else:
-            slug = '%s/%s' % (instance.team.slug, instance.slug)
-        return mark_safe('%s<br><small>%s</small>' % (
-            escape(slug), escape(instance.name)))
+    def value_repr(self, instance):
+        return '<pre style="display:inline-block;white-space:pre-wrap;">{}</pre>'.format(
+            escape(saferepr(instance.value))
+        )
+
+    value_repr.short_description = "Value"
+    value_repr.allow_tags = True
+
+
+admin.site.register(Option, OptionAdmin)
+
+
+class ProjectAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'organization', 'status', 'date_added')
+    list_filter = ('status', 'public')
+    search_fields = ('name', 'organization__slug', 'organization__name', 'team__slug',
+                     'team__name', 'slug')
+    raw_id_fields = ('team', 'organization')
+    readonly_fields = ('first_event', 'date_added')
 
 admin.site.register(Project, ProjectAdmin)
 
 
-class TeamMemberInline(admin.TabularInline):
-    model = TeamMember
+class OrganizationApiKeyInline(admin.TabularInline):
+    model = ApiKey
     extra = 1
+    fields = ('label', 'key', 'status', 'allowed_origins', 'date_added')
+    raw_id_fields = ('organization',)
 
-    raw_id_fields = ('user', 'team')
+
+class OrganizationProjectInline(admin.TabularInline):
+    model = Project
+    extra = 1
+    fields = ('name', 'slug', 'status', 'date_added')
+    raw_id_fields = ('organization', 'team')
+
+
+class OrganizationTeamInline(admin.TabularInline):
+    model = Team
+    extra = 1
+    fields = ('name', 'slug', 'status', 'date_added')
+    raw_id_fields = ('organization',)
+
+
+class OrganizationMemberInline(admin.TabularInline):
+    model = OrganizationMember
+    extra = 1
+    fields = ('user', 'organization', 'role')
+    raw_id_fields = ('user', 'organization')
+
+
+class AuthIdentityInline(admin.TabularInline):
+    model = AuthIdentity
+    extra = 1
+    fields = ('user', 'auth_provider', 'ident', 'data', 'last_verified')
+    raw_id_fields = ('user', 'auth_provider')
+
+
+class OrganizationAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'status')
+    list_filter = ('status',)
+    search_fields = ('name', 'slug')
+    fields = ('name', 'slug', 'status')
+    inlines = (OrganizationMemberInline, OrganizationTeamInline,
+               OrganizationProjectInline, OrganizationApiKeyInline)
+
+admin.site.register(Organization, OrganizationAdmin)
+
+
+class AuthProviderAdmin(admin.ModelAdmin):
+    list_display = ('organization', 'provider', 'date_added')
+    search_fields = ('organization__name',)
+    raw_id_fields = ('organization', 'default_teams')
+    list_filter = ('provider',)
+
+admin.site.register(AuthProvider, AuthProviderAdmin)
+
+
+class AuthIdentityAdmin(admin.ModelAdmin):
+    list_display = ('user', 'auth_provider', 'ident', 'date_added', 'last_verified')
+    list_filter = ('auth_provider__provider',)
+    search_fields = ('user__email', 'user__username',
+                     'auth_provider__organization__name')
+    raw_id_fields = ('user', 'auth_provider')
+
+admin.site.register(AuthIdentity, AuthIdentityAdmin)
+
+
+class TeamProjectInline(admin.TabularInline):
+    model = Project
+    extra = 1
+    fields = ('name', 'slug')
+    raw_id_fields = ('organization', 'team')
 
 
 class TeamAdmin(admin.ModelAdmin):
-    list_display = ('name', 'owner', 'slug', 'status')
+    list_display = ('name', 'slug', 'organization', 'status', 'date_added')
     list_filter = ('status',)
-    search_fields = ('name', 'owner__username', 'owner__email', 'slug')
-    raw_id_fields = ('owner',)
-    inlines = (TeamMemberInline,)
+    search_fields = ('name', 'organization__name', 'slug')
+    raw_id_fields = ('organization',)
+    inlines = (TeamProjectInline,)
+
+    def save_model(self, request, obj, form, change):
+        prev_org = obj.organization_id
+        super(TeamAdmin, self).save_model(request, obj, form, change)
+        if not change:
+            return
+        new_org = obj.organization_id
+        if new_org != prev_org:
+            return
+
+        Project.objects.filter(
+            team=obj,
+        ).update(
+            organization=obj.organization,
+        )
+
+        old_memberships = OrganizationMember.objects.filter(
+            teams=obj,
+        ).exclude(organization=obj.organization)
+        for member in old_memberships:
+            try:
+                new_member = OrganizationMember.objects.get(
+                    user=member.user,
+                    organization=obj.organization,
+                )
+            except OrganizationMember.DoesNotExist:
+                continue
+            OrganizationMemberTeam.objects.create(
+                team=obj,
+                organizationmember=new_member,
+            )
+
+        OrganizationMemberTeam.objects.filter(
+            team=obj,
+        ).exclude(
+            organizationmember__organization=obj.organization,
+        ).delete()
 
 admin.site.register(Team, TeamAdmin)
 
@@ -71,7 +188,7 @@ class UserAdmin(admin.ModelAdmin):
     change_user_password_template = None
     fieldsets = (
         (None, {'fields': ('username', 'password')}),
-        (_('Personal info'), {'fields': ('first_name', 'last_name', 'email')}),
+        (_('Personal info'), {'fields': ('name', 'email')}),
         (_('Permissions'), {'fields': ('is_active', 'is_staff', 'is_superuser')}),
         (_('Important dates'), {'fields': ('last_login', 'date_joined')}),
     )
@@ -84,11 +201,11 @@ class UserAdmin(admin.ModelAdmin):
     form = UserChangeForm
     add_form = UserCreationForm
     change_password_form = AdminPasswordChangeForm
-    list_display = ('username', 'email', 'first_name', 'last_name', 'is_staff')
+    list_display = ('username', 'email', 'name', 'is_staff', 'date_joined')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'is_managed')
-    search_fields = ('username', 'first_name', 'last_name', 'email')
+    search_fields = ('username', 'name', 'email')
     ordering = ('username',)
-    inlines = (TeamMemberInline,)
+    inlines = (OrganizationMemberInline, AuthIdentityInline)
 
     def get_fieldsets(self, request, obj=None):
         if not obj:
@@ -123,7 +240,7 @@ class UserAdmin(admin.ModelAdmin):
 
     @sensitive_post_parameters_m
     @csrf_protect_m
-    @transaction.commit_on_success
+    @transaction.atomic
     def add_view(self, request, form_url='', extra_context=None):
         # It's an error for a user to have add permission but NOT change
         # permission for users. If we allowed such users to add users, they
@@ -208,3 +325,14 @@ class UserAdmin(admin.ModelAdmin):
                                                    post_url_continue)
 
 admin.site.register(User, UserAdmin)
+
+
+class AuditLogEntryAdmin(admin.ModelAdmin):
+    list_display = ('event', 'organization', 'actor', 'datetime')
+    list_filter = ('event', 'datetime')
+    search_fields = ('actor__email', 'organization__name', 'organization__slug')
+    raw_id_fields = ('organization', 'actor', 'target_user')
+    readonly_fields = ('organization', 'actor', 'actor_key', 'target_object',
+                       'target_user', 'event', 'ip_address', 'data', 'datetime')
+
+admin.site.register(AuditLogEntry, AuditLogEntryAdmin)

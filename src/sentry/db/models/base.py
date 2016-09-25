@@ -8,6 +8,9 @@ sentry.db.models
 
 from __future__ import absolute_import
 
+import logging
+import six
+
 from django.db import models
 from django.db.models import signals
 
@@ -64,13 +67,20 @@ class BaseModel(models.Model):
 
     def __get_field_value(self, field):
         if isinstance(field, models.ForeignKey):
-            return getattr(self, field.column)
-        return getattr(self, field.name)
+            return getattr(self, field.column, None)
+        return getattr(self, field.name, None)
 
     def _update_tracked_data(self):
         "Updates a local copy of attributes values"
         if self.id:
-            self.__data = dict((f.column, self.__get_field_value(f)) for f in self._meta.fields)
+            data = {}
+            for f in self._meta.fields:
+                try:
+                    data[f.column] = self.__get_field_value(f)
+                except AttributeError as e:
+                    # this case can come up from pickling
+                    logging.exception(six.text_type(e))
+            self.__data = data
         else:
             self.__data = UNSAVED
 
@@ -88,17 +98,28 @@ class BaseModel(models.Model):
         return self.__data.get(field_name)
 
 
-def __model_post_save(instance, **kwargs):
-    if not isinstance(instance, BaseModel):
-        return
-    instance._update_tracked_data()
-
-
 class Model(BaseModel):
     id = BoundedBigAutoField(primary_key=True)
 
     class Meta:
         abstract = True
 
+    __repr__ = sane_repr('id')
+
+
+def __model_post_save(instance, **kwargs):
+    if not isinstance(instance, BaseModel):
+        return
+    instance._update_tracked_data()
+
+
+def __model_class_prepared(sender, **kwargs):
+    if not issubclass(sender, BaseModel):
+        return
+
+    if not hasattr(sender, '__core__'):
+        raise ValueError('{!r} model has not defined __core__'.format(sender))
+
 
 signals.post_save.connect(__model_post_save)
+signals.class_prepared.connect(__model_class_prepared)

@@ -7,6 +7,8 @@ sentry.utils.javascript
 """
 from __future__ import absolute_import
 
+import six
+
 from collections import defaultdict
 from datetime import timedelta
 from django.core.urlresolvers import reverse
@@ -14,17 +16,35 @@ from django.utils import timezone
 from django.utils.html import escape
 
 from sentry.app import env, tsdb
-from sentry.constants import STATUS_RESOLVED, STATUS_MUTED, TAG_LABELS
+from sentry.constants import TAG_LABELS
 from sentry.models import (
-    Group, GroupBookmark, GroupTagKey, GroupSeen, ProjectOption
+    Group, GroupBookmark, GroupMeta, GroupTagKey, GroupSeen, GroupStatus,
+    ProjectOption
 )
-from sentry.templatetags.sentry_plugins import get_tags
+from sentry.templatetags.sentry_plugins import get_legacy_annotations
 from sentry.utils import json
 from sentry.utils.db import attach_foreignkey
 from sentry.utils.http import absolute_uri
 
 
 transformers = {}
+
+
+def has_sourcemap(event):
+    if event.platform != 'javascript':
+        return False
+    data = event.data
+
+    if 'sentry.interfaces.Exception' not in data:
+        return False
+    exception = data['sentry.interfaces.Exception']
+    for value in exception['values']:
+        stacktrace = value.get('stacktrace', {})
+        for frame in stacktrace.get('frames', []):
+            if 'sourcemap' in frame.get('data', {}):
+                return True
+
+    return False
 
 
 def transform(objects, request=None):
@@ -35,7 +55,7 @@ def transform(objects, request=None):
     elif not isinstance(objects, (list, tuple)):
         return transform([objects], request=request)[0]
     # elif isinstance(obj, dict):
-    #     return dict((k, transform(v, request=request)) for k, v in obj.iteritems())
+    #     return dict((k, transform(v, request=request)) for k, v in six.iteritems(obj))
     t = transformers.get(type(objects[0]))
 
     if t:
@@ -46,7 +66,7 @@ def transform(objects, request=None):
 
 def to_json(obj, request=None):
     result = transform(obj, request=request)
-    return json.dumps(result)
+    return json.dumps_htmlsafe(result)
 
 
 def register(type):
@@ -73,6 +93,8 @@ class GroupTransformer(Transformer):
         from sentry.templatetags.sentry_plugins import handle_before_events
 
         attach_foreignkey(objects, Group.project, ['team'])
+
+        GroupMeta.objects.populate_cache(objects)
 
         if request and objects:
             handle_before_events(request, objects)
@@ -147,9 +169,9 @@ class GroupTransformer(Transformer):
 
     def transform(self, obj, request=None):
         status = obj.get_status()
-        if status == STATUS_RESOLVED:
+        if status == GroupStatus.RESOLVED:
             status_label = 'resolved'
-        elif status == STATUS_MUTED:
+        elif status == GroupStatus.MUTED:
             status_label = 'muted'
         else:
             status_label = 'unresolved'
@@ -160,20 +182,19 @@ class GroupTransformer(Transformer):
         version = int(version.strftime('%s'))
 
         d = {
-            'id': str(obj.id),
-            'count': str(obj.times_seen),
+            'id': six.text_type(obj.id),
+            'count': six.text_type(obj.times_seen),
             'title': escape(obj.title),
             'message': escape(obj.message_short),
             'level': obj.level,
             'levelName': escape(obj.get_level_display()),
             'logger': escape(obj.logger),
-            'permalink': absolute_uri(reverse('sentry-group', args=[obj.team.slug, obj.project.slug, obj.id])),
+            'permalink': absolute_uri(reverse('sentry-group', args=[obj.organization.slug, obj.project.slug, obj.id])),
             'firstSeen': self.localize_datetime(obj.first_seen, request=request),
             'lastSeen': self.localize_datetime(obj.last_seen, request=request),
-            'timeSpent': obj.avg_time_spent,
             'canResolve': request and request.user.is_authenticated(),
             'status': status_label,
-            'isResolved': obj.get_status() == STATUS_RESOLVED,
+            'isResolved': obj.get_status() == GroupStatus.RESOLVED,
             'isPublic': obj.is_public,
             'score': getattr(obj, 'sort_value', 0),
             'project': {
@@ -190,6 +211,8 @@ class GroupTransformer(Transformer):
             d['historicalData'] = obj.historical_data
         if hasattr(obj, 'annotations'):
             d['annotations'] = obj.annotations
+
+        # TODO(dcramer): these aren't tags, and annotations aren't annotations
         if request:
-            d['tags'] = list(get_tags(obj, request))
+            d['tags'] = get_legacy_annotations(obj, request)
         return d

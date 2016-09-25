@@ -8,7 +8,7 @@ sentry.utils.imports
 from __future__ import absolute_import
 
 import pkgutil
-import sys
+import six
 
 
 class ModuleProxyCache(dict):
@@ -18,7 +18,7 @@ class ModuleProxyCache(dict):
 
         module_name, class_name = key.rsplit('.', 1)
 
-        module = __import__(module_name, {}, {}, [class_name], -1)
+        module = __import__(module_name, {}, {}, [class_name])
         handler = getattr(module, class_name)
 
         # We cache a NoneType for missing imports to avoid repeated lookups
@@ -43,12 +43,13 @@ def import_submodules(context, root_module, path):
     """
     Import all submodules and register them in the ``context`` namespace.
 
-    >>> import_submodules(globals(), __name__, __path__)
+    >>> import_submodules(locals(), __name__, __path__)
     """
-    for loader, module_name, is_pkg in pkgutil.walk_packages(path):
-        module = loader.find_module(module_name).load_module(module_name)
-        for k, v in vars(module).iteritems():
+    for loader, module_name, is_pkg in pkgutil.walk_packages(path, root_module + '.'):
+        # this causes a Runtime error with model conflicts
+        # module = loader.find_module(module_name).load_module(module_name)
+        module = __import__(module_name, globals(), locals(), ['__name__'])
+        for k, v in six.iteritems(vars(module)):
             if not k.startswith('_'):
                 context[k] = v
         context[module_name] = module
-        sys.modules['{0}.{1}'.format(root_module, module_name)] = module

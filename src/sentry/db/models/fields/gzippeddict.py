@@ -9,26 +9,25 @@ sentry.db.models.fields.gzippeddict
 from __future__ import absolute_import, print_function
 
 import logging
+import six
 
 from django.db import models
-
-import six
+from south.modelsinspector import add_introspection_rules
 
 from sentry.utils.compat import pickle
 from sentry.utils.strings import decompress, compress
 
 __all__ = ('GzippedDictField',)
 
-logger = logging.getLogger('sentry.errors')
+logger = logging.getLogger('sentry')
 
 
+@six.add_metaclass(models.SubfieldBase)
 class GzippedDictField(models.TextField):
     """
     Slightly different from a JSONField in the sense that the default
     value is a dictionary.
     """
-    __metaclass__ = models.SubfieldBase
-
     def to_python(self, value):
         if isinstance(value, six.string_types) and value:
             try:
@@ -44,18 +43,15 @@ class GzippedDictField(models.TextField):
         if not value and self.null:
             # save ourselves some storage
             return None
-        # enforce unicode strings to guarantee consistency
-        if isinstance(value, str):
+        # enforce six.text_type strings to guarantee consistency
+        if isinstance(value, six.binary_type):
             value = six.text_type(value)
+        # db values need to be in unicode
         return compress(pickle.dumps(value))
 
     def value_to_string(self, obj):
         value = self._get_val_from_obj(obj)
         return self.get_prep_value(value)
 
-    def south_field_triple(self):
-        "Returns a suitable description of this field for South."
-        from south.modelsinspector import introspector
-        field_class = "django.db.models.fields.TextField"
-        args, kwargs = introspector(self)
-        return (field_class, args, kwargs)
+
+add_introspection_rules([], ["^sentry\.db\.models\.fields\.gzippeddict\.GzippedDictField"])

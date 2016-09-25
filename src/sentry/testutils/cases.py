@@ -8,78 +8,87 @@ sentry.testutils.cases
 
 from __future__ import absolute_import
 
-__all__ = ('TestCase', 'TransactionTestCase', 'APITestCase')
+__all__ = (
+    'TestCase', 'TransactionTestCase', 'APITestCase', 'AuthProviderTestCase',
+    'RuleTestCase', 'PermissionTestCase', 'PluginTestCase', 'CliTestCase',
+    'AcceptanceTestCase',
+)
 
 import base64
+import os
 import os.path
-import urllib
+import pytest
+import six
 
+from click.testing import CliRunner
+from contextlib import contextmanager
 from django.conf import settings
 from django.contrib.auth import login
 from django.core.cache import cache
-from django.core.management import call_command
 from django.core.urlresolvers import reverse
-from django.db import connections, DEFAULT_DB_ALIAS
 from django.http import HttpRequest
 from django.test import TestCase, TransactionTestCase
-from django.test.client import Client
 from django.utils.importlib import import_module
-from exam import Exam
-from nydus.db import create_cluster
+from exam import before, fixture, Exam
 from rest_framework.test import APITestCase as BaseAPITestCase
+from six.moves.urllib.parse import urlencode
 
+from sentry import auth
+from sentry.auth.providers.dummy import DummyProvider
 from sentry.constants import MODULE_ROOT
 from sentry.models import GroupMeta, ProjectOption
+from sentry.plugins import plugins
 from sentry.rules import EventState
 from sentry.utils import json
 
 from .fixtures import Fixtures
-from .helpers import get_auth_header
+from .helpers import AuthProvider, Feature, get_auth_header, TaskRunner, override_options
 
-
-def create_redis_conn():
-    options = {
-        'engine': 'nydus.db.backends.redis.Redis',
-    }
-    options.update(settings.SENTRY_REDIS_OPTIONS)
-
-    return create_cluster(options)
-
-_redis_conn = create_redis_conn()
-
-
-def flush_redis():
-    _redis_conn.flushdb()
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36'
 
 
 class BaseTestCase(Fixtures, Exam):
-    urls = 'tests.sentry.web.urls'
+    urls = 'sentry.web.urls'
 
     def assertRequiresAuthentication(self, path, method='GET'):
         resp = getattr(self.client, method.lower())(path)
         assert resp.status_code == 302
-        assert resp['Location'] == 'http://testserver' + reverse('sentry-login')
+        assert resp['Location'].startswith('http://testserver' + reverse('sentry-login'))
 
-    def login_as(self, user):
-        user.backend = settings.AUTHENTICATION_BACKENDS[0]
+    @before
+    def setup_dummy_auth_provider(self):
+        auth.register('dummy', DummyProvider)
+        self.addCleanup(auth.unregister, 'dummy', DummyProvider)
 
+    @before
+    def setup_session(self):
         engine = import_module(settings.SESSION_ENGINE)
 
-        request = HttpRequest()
-        if self.client.session:
-            request.session = self.client.session
-        else:
-            request.session = engine.SessionStore()
+        session = engine.SessionStore()
+        session.save()
 
-        login(request, user)
-        request.user = user
+        self.session = session
 
-        # Save the session values.
-        request.session.save()
+    def tasks(self):
+        return TaskRunner()
 
-        # Set the cookie to represent the session.
-        session_cookie = settings.SESSION_COOKIE_NAME
-        self.client.cookies[session_cookie] = request.session.session_key
+    def feature(self, name, active=True):
+        """
+        >>> with self.feature('feature:name')
+        >>>     # ...
+        """
+        return Feature(name, active)
+
+    def auth_provider(self, name, cls):
+        """
+        >>> with self.auth_provider('name', Provider)
+        >>>     # ...
+        """
+        return AuthProvider(name, cls)
+
+    def save_session(self):
+        self.session.save()
+
         cookie_data = {
             'max-age': None,
             'path': '/',
@@ -87,10 +96,22 @@ class BaseTestCase(Fixtures, Exam):
             'secure': settings.SESSION_COOKIE_SECURE or None,
             'expires': None,
         }
+
+        session_cookie = settings.SESSION_COOKIE_NAME
+        self.client.cookies[session_cookie] = self.session.session_key
         self.client.cookies[session_cookie].update(cookie_data)
 
-    def login(self):
-        self.login_as(self.user)
+    def login_as(self, user):
+        user.backend = settings.AUTHENTICATION_BACKENDS[0]
+
+        request = HttpRequest()
+        request.session = self.session
+
+        login(request, user)
+        request.user = user
+
+        # Save the session values.
+        self.save_session()
 
     def load_fixture(self, filepath):
         filepath = os.path.join(
@@ -103,35 +124,56 @@ class BaseTestCase(Fixtures, Exam):
             return fp.read()
 
     def _pre_setup(self):
+        super(BaseTestCase, self)._pre_setup()
+
         cache.clear()
         ProjectOption.objects.clear_local_cache()
         GroupMeta.objects.clear_local_cache()
-        super(BaseTestCase, self)._pre_setup()
 
     def _post_teardown(self):
-        flush_redis()
         super(BaseTestCase, self)._post_teardown()
 
     def _makeMessage(self, data):
-        return json.dumps(data)
+        return json.dumps(data).encode('utf-8')
 
     def _makePostMessage(self, data):
         return base64.b64encode(self._makeMessage(data))
 
-    def _postWithHeader(self, data, key=None, secret=None):
+    def _postWithHeader(self, data, key=None, secret=None, protocol=None):
         if key is None:
             key = self.projectkey.public_key
             secret = self.projectkey.secret_key
 
         message = self._makePostMessage(data)
-        resp = self.client.post(
-            reverse('sentry-api-store'), message,
-            content_type='application/octet-stream',
-            HTTP_X_SENTRY_AUTH=get_auth_header('_postWithHeader', key, secret),
-        )
+        with self.tasks():
+            resp = self.client.post(
+                reverse('sentry-api-store'), message,
+                content_type='application/octet-stream',
+                HTTP_X_SENTRY_AUTH=get_auth_header(
+                    '_postWithHeader/0.0.0',
+                    key,
+                    secret,
+                    protocol,
+                ),
+            )
         return resp
 
-    def _getWithReferer(self, data, key=None, referer='getsentry.com', protocol='4'):
+    def _postCspWithHeader(self, data, key=None, **extra):
+        if isinstance(data, dict):
+            body = json.dumps({'csp-report': data})
+        elif isinstance(data, six.string_types):
+            body = data
+        path = reverse('sentry-api-csp-report', kwargs={'project_id': self.project.id})
+        path += '?sentry_key=%s' % self.projectkey.public_key
+        with self.tasks():
+            return self.client.post(
+                path, data=body,
+                content_type='application/csp-report',
+                HTTP_USER_AGENT=DEFAULT_USER_AGENT,
+                **extra
+            )
+
+    def _getWithReferer(self, data, key=None, referer='sentry.io', protocol='4'):
         if key is None:
             key = self.projectkey.public_key
 
@@ -146,11 +188,55 @@ class BaseTestCase(Fixtures, Exam):
             'sentry_key': key,
             'sentry_data': message,
         }
-        resp = self.client.get(
-            '%s?%s' % (reverse('sentry-api-store', args=(self.project.pk,)), urllib.urlencode(qs)),
-            **headers
-        )
+        with self.tasks():
+            resp = self.client.get(
+                '%s?%s' % (reverse('sentry-api-store', args=(self.project.pk,)), urlencode(qs)),
+                **headers
+            )
         return resp
+
+    def _postWithReferer(self, data, key=None, referer='sentry.io', protocol='4'):
+        if key is None:
+            key = self.projectkey.public_key
+
+        headers = {}
+        if referer is not None:
+            headers['HTTP_REFERER'] = referer
+
+        message = self._makeMessage(data)
+        qs = {
+            'sentry_version': protocol,
+            'sentry_client': 'raven-js/lol',
+            'sentry_key': key,
+        }
+        with self.tasks():
+            resp = self.client.post(
+                '%s?%s' % (reverse('sentry-api-store', args=(self.project.pk,)), urlencode(qs)),
+                data=message,
+                content_type='application/json',
+                **headers
+            )
+        return resp
+
+    def options(self, options):
+        """
+        A context manager that temporarily sets a global option and reverts
+        back to the original value when exiting the context.
+        """
+        return override_options(options)
+
+    @contextmanager
+    def dsn(self, dsn):
+        """
+        A context manager that temporarily sets the internal client's DSN
+        """
+        from raven.contrib.django.models import client
+
+        try:
+            client.set_dsn(dsn)
+            yield
+        finally:
+            client.set_dsn(None)
 
     _postWithSignature = _postWithHeader
     _postWithNewSignature = _postWithHeader
@@ -161,58 +247,23 @@ class TestCase(BaseTestCase, TestCase):
 
 
 class TransactionTestCase(BaseTestCase, TransactionTestCase):
-    """
-    Subclass of ``django.test.TransactionTestCase`` that quickly tears down
-    fixtures and doesn't `flush` on setup.  This enables tests to be run in
-    any order.
-    """
-    urls = 'tests.urls'
-
-    def __call__(self, result=None):
-        """
-        Wrapper around default __call__ method to perform common Django test
-        set up. This means that user-defined Test Cases aren't required to
-        include a call to super().setUp().
-        """
-        self.client = getattr(self, 'client_class', Client)()
-        try:
-            self._pre_setup()
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            import sys
-            result.addError(self, sys.exc_info())
-            return
-        try:
-            super(TransactionTestCase, self).__call__(result)
-        finally:
-            try:
-                self._post_teardown()
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except Exception:
-                import sys
-                result.addError(self, sys.exc_info())
-
-    def _get_databases(self):
-        if getattr(self, 'multi_db', False):
-            return connections
-        return [DEFAULT_DB_ALIAS]
-
-    def _fixture_setup(self):
-        for db in self._get_databases():
-            if hasattr(self, 'fixtures') and self.fixtures:
-                # We have to use this slightly awkward syntax due to the fact
-                # that we're using *args and **kwargs together.
-                call_command('loaddata', *self.fixtures, **{'verbosity': 0, 'database': db})
-
-    def _fixture_teardown(self):
-        for db in self._get_databases():
-            call_command('flush', verbosity=0, interactive=False, database=db)
+    pass
 
 
 class APITestCase(BaseTestCase, BaseAPITestCase):
     pass
+
+
+class AuthProviderTestCase(TestCase):
+    provider = DummyProvider
+    provider_name = 'dummy'
+
+    def setUp(self):
+        super(AuthProviderTestCase, self).setUp()
+        # TestCase automatically sets up dummy provider
+        if self.provider_name != 'dummy' or self.provider != DummyProvider:
+            auth.register(self.provider_name, self.provider)
+            self.addCleanup(auth.unregister, self.provider_name, self.provider)
 
 
 class RuleTestCase(TestCase):
@@ -232,6 +283,7 @@ class RuleTestCase(TestCase):
         kwargs.setdefault('is_regression', True)
         kwargs.setdefault('is_sample', True)
         kwargs.setdefault('rule_is_active', False)
+        kwargs.setdefault('rule_last_active', None)
         return EventState(**kwargs)
 
     def assertPasses(self, rule, event=None, **kwargs):
@@ -245,3 +297,135 @@ class RuleTestCase(TestCase):
             event = self.event
         state = self.get_state(**kwargs)
         assert rule.passes(event, state) is False
+
+
+class PermissionTestCase(TestCase):
+    def setUp(self):
+        super(PermissionTestCase, self).setUp()
+        self.owner = self.create_user(is_superuser=False)
+        self.organization = self.create_organization(
+            owner=self.owner,
+            flags=0,  # disable default allow_joinleave access
+        )
+        self.team = self.create_team(organization=self.organization)
+
+    def assert_can_access(self, user, path, method='GET'):
+        self.login_as(user)
+        resp = getattr(self.client, method.lower())(path)
+        assert resp.status_code >= 200 and resp.status_code < 300
+
+    def assert_cannot_access(self, user, path, method='GET'):
+        self.login_as(user)
+        resp = getattr(self.client, method.lower())(path)
+        assert resp.status_code >= 300
+
+    def assert_member_can_access(self, path):
+        return self.assert_role_can_access(path, 'member')
+
+    def assert_teamless_member_can_access(self, path):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role='member', teams=[],
+        )
+
+        self.assert_can_access(user, path)
+
+    def assert_member_cannot_access(self, path):
+        return self.assert_role_cannot_access(path, 'member')
+
+    def assert_manager_cannot_access(self, path):
+        return self.assert_role_cannot_access(path, 'manager')
+
+    def assert_teamless_member_cannot_access(self, path):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role='member', teams=[],
+        )
+
+        self.assert_cannot_access(user, path)
+
+    def assert_team_admin_can_access(self, path):
+        return self.assert_role_can_access(path, 'owner')
+
+    def assert_teamless_admin_can_access(self, path):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role='admin', teams=[],
+        )
+
+        self.assert_can_access(user, path)
+
+    def assert_team_admin_cannot_access(self, path):
+        return self.assert_role_cannot_access(path, 'admin')
+
+    def assert_teamless_admin_cannot_access(self, path):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role='admin', teams=[],
+        )
+
+        self.assert_cannot_access(user, path)
+
+    def assert_team_owner_can_access(self, path):
+        return self.assert_role_can_access(path, 'owner')
+
+    def assert_owner_can_access(self, path):
+        return self.assert_role_can_access(path, 'owner')
+
+    def assert_owner_cannot_access(self, path):
+        return self.assert_role_cannot_access(path, 'owner')
+
+    def assert_non_member_cannot_access(self, path):
+        user = self.create_user(is_superuser=False)
+        self.assert_cannot_access(user, path)
+
+    def assert_role_can_access(self, path, role):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role=role, teams=[self.team],
+        )
+
+        self.assert_can_access(user, path)
+
+    def assert_role_cannot_access(self, path, role):
+        user = self.create_user(is_superuser=False)
+        self.create_member(
+            user=user, organization=self.organization,
+            role=role, teams=[self.team],
+        )
+
+        self.assert_cannot_access(user, path)
+
+
+class PluginTestCase(TestCase):
+    plugin = None
+
+    def setUp(self):
+        super(PluginTestCase, self).setUp()
+        plugins.register(self.plugin)
+        self.addCleanup(plugins.unregister, self.plugin)
+
+
+class CliTestCase(TestCase):
+    runner = fixture(CliRunner)
+    command = None
+    default_args = []
+
+    def invoke(self, *args):
+        args += tuple(self.default_args)
+        return self.runner.invoke(self.command, args, obj={})
+
+
+@pytest.mark.usefixtures('browser')
+class AcceptanceTestCase(TransactionTestCase):
+    def save_session(self):
+        self.session.save()
+        self.browser.save_cookie(
+            name=settings.SESSION_COOKIE_NAME,
+            value=self.session.session_key,
+        )

@@ -12,16 +12,20 @@ from django.core.signals import request_finished
 from django.conf import settings
 from django.db import models
 
-from sentry.db.models import Model, sane_repr
+from sentry.db.models import FlexibleForeignKey, Model, sane_repr
 from sentry.db.models.fields import UnicodePickledObjectField
 from sentry.db.models.manager import BaseManager
+
+
+class UserOptionValue(object):
+    # 'workflow:notifications'
+    all_conversations = '0'
+    participating_only = '1'
 
 
 class UserOptionManager(BaseManager):
     def __init__(self, *args, **kwargs):
         super(UserOptionManager, self).__init__(*args, **kwargs)
-        task_postrun.connect(self.clear_cache)
-        request_finished.connect(self.clear_cache)
         self.__metadata = {}
 
     def __getstate__(self):
@@ -89,16 +93,29 @@ class UserOptionManager(BaseManager):
     def clear_cache(self, **kwargs):
         self.__metadata = {}
 
+    def contribute_to_class(self, model, name):
+        super(UserOptionManager, self).contribute_to_class(model, name)
+        task_postrun.connect(self.clear_cache)
+        request_finished.connect(self.clear_cache)
 
+
+# TODO(dcramer): the NULL UNIQUE constraint here isnt valid, and instead has to
+# be manually replaced in the database. We should restructure this model.
 class UserOption(Model):
     """
     User options apply only to a user, and optionally a project.
 
     Options which are specific to a plugin should namespace
     their key. e.g. key='myplugin:optname'
+
+    Keeping user feature state
+    key: "feature:assignment"
+    value: { updated: datetime, state: bool }
     """
-    user = models.ForeignKey(settings.AUTH_USER_MODEL)
-    project = models.ForeignKey('sentry.Project', null=True)
+    __core__ = True
+
+    user = FlexibleForeignKey(settings.AUTH_USER_MODEL)
+    project = FlexibleForeignKey('sentry.Project', null=True)
     key = models.CharField(max_length=64)
     value = UnicodePickledObjectField()
 

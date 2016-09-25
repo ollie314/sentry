@@ -12,6 +12,8 @@ from django import forms
 
 from sentry.plugins import plugins
 from sentry.rules.actions.base import EventAction
+from sentry.utils.safe import safe_execute
+from sentry.utils import metrics
 
 
 class NotifyEventServiceForm(forms.Form):
@@ -36,31 +38,42 @@ class NotifyEventServiceAction(EventAction):
     def after(self, event, state):
         service = self.get_option('service')
 
+        extra = {
+            'event_id': event.id
+        }
         if not service:
-            self.logger.info('Rule has no service configured')
+            self.logger.info('rules.fail.is_configured', extra=extra)
             return
 
         plugin = plugins.get(service)
         if not plugin.is_enabled(self.project):
-            self.logger.info('Rule is configured against disabled service')
+            extra['project_id'] = self.project.id
+            self.logger.info('rules.fail.is_enabled', extra=extra)
             return
 
         group = event.group
 
         if not plugin.should_notify(group=group, event=event):
-            self.logger.info('Rule failed should_notify check')
+            extra['group_id'] = group.id
+            self.logger.info('rule.fail.should_notify', extra=extra)
             return
 
-        plugin.notify_users(group=group, event=event)
+        metrics.incr('notifications.sent', instance=plugin.slug)
+        yield self.future(plugin.rule_notify)
 
     def get_plugins(self):
         from sentry.plugins.bases.notify import NotificationPlugin
 
         results = []
-        for plugin in plugins.for_project(self.project):
+        for plugin in plugins.for_project(self.project, version=1):
             if not isinstance(plugin, NotificationPlugin):
                 continue
             results.append(plugin)
+
+        for plugin in plugins.for_project(self.project, version=2):
+            for notifier in (safe_execute(plugin.get_notifiers, _with_transaction=False) or ()):
+                results.append(notifier)
+
         return results
 
     def get_form_instance(self):

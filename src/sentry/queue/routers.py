@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import itertools
+import six
 
 from celery import current_app
 
@@ -12,7 +13,6 @@ COUNTER_TASKS = set([
 
 TRIGGER_TASKS = set([
     'sentry.tasks.post_process.post_process_group',
-    'sentry.tasks.post_process.execute_rule',
     'sentry.tasks.post_process.plugin_post_process_group',
     'sentry.tasks.post_process.record_affected_user',
     'sentry.tasks.post_process.record_affected_code',
@@ -34,7 +34,7 @@ class SplitQueueRouter(object):
 
     def route_for_task(self, task, *args, **kwargs):
         if task in COUNTER_TASKS:
-            return {'queue': self.counter_queues.next()}
+            return {'queue': six.next(self.counter_queues)}
         if task in TRIGGER_TASKS:
-            return {'queue': self.trigger_queues.next()}
+            return {'queue': six.next(self.trigger_queues)}
         return None

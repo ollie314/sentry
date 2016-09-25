@@ -4,119 +4,57 @@ from __future__ import absolute_import
 
 from mock import Mock, patch
 
-from sentry.models import Group, Rule
-from sentry.rules import EventState
+from sentry.models import EventTag, TagKey, TagValue
 from sentry.testutils import TestCase
-from sentry.tasks.post_process import (
-    execute_rule, post_process_group, record_affected_user,
-    record_affected_code
-)
+from sentry.tasks.merge import merge_group
+from sentry.tasks.post_process import index_event_tags, post_process_group
 
 
 class PostProcessGroupTest(TestCase):
-    @patch('sentry.tasks.post_process.record_affected_code')
-    @patch('sentry.tasks.post_process.get_rules', Mock(return_value=[]))
-    def test_record_affected_code(self, mock_record_affected_code):
+    @patch('sentry.tasks.post_process.record_affected_user', Mock())
+    @patch('sentry.rules.processor.RuleProcessor')
+    def test_rule_processor(self, mock_processor):
         group = self.create_group(project=self.project)
         event = self.create_event(group=group)
 
-        with self.settings(SENTRY_ENABLE_EXPLORE_CODE=False):
-            post_process_group(
-                event=event,
-                is_new=True,
-                is_regression=False,
-                is_sample=False,
-            )
+        mock_callback = Mock()
+        mock_futures = [Mock()]
 
-        assert not mock_record_affected_code.delay.called
-
-        with self.settings(SENTRY_ENABLE_EXPLORE_CODE=True):
-            post_process_group(
-                event=event,
-                is_new=True,
-                is_regression=False,
-                is_sample=False,
-            )
-
-        mock_record_affected_code.delay.assert_called_once_with(
-            event=event,
-        )
-
-    @patch('sentry.tasks.post_process.record_affected_user')
-    @patch('sentry.tasks.post_process.get_rules', Mock(return_value=[]))
-    def test_record_affected_user(self, mock_record_affected_user):
-        group = self.create_group(project=self.project)
-        event = self.create_event(group=group)
-
-        with self.settings(SENTRY_ENABLE_EXPLORE_USERS=False):
-            post_process_group(
-                event=event,
-                is_new=True,
-                is_regression=False,
-                is_sample=False,
-            )
-
-        assert not mock_record_affected_user.delay.called
-
-        with self.settings(SENTRY_ENABLE_EXPLORE_USERS=True):
-            post_process_group(
-                event=event,
-                is_new=True,
-                is_regression=False,
-                is_sample=False,
-            )
-
-        mock_record_affected_user.delay.assert_called_once_with(
-            event=event,
-        )
-
-    @patch('sentry.tasks.post_process.execute_rule')
-    @patch('sentry.tasks.post_process.get_rules')
-    def test_execute_rule(self, mock_get_rules, mock_execute_rule):
-        action_id = 'sentry.rules.actions.notify_event.NotifyEventAction'
-        condition_id = 'sentry.rules.conditions.first_seen_event.FirstSeenEventCondition'
-
-        group = self.create_group(project=self.project)
-        event = self.create_event(group=group)
-
-        mock_get_rules.return_value = [
-            Rule(
-                id=1,
-                data={
-                    'actions': [{
-                        'id': 'sentry.rules.actions.notify_event.NotifyEventAction',
-                    }],
-                    'conditions': [{
-                        'id': 'sentry.rules.conditions.first_seen_event.FirstSeenEventCondition',
-                    }],
-                }
-            ),
-            Rule(
-                id=2,
-                data={
-                    'actions': [{
-                        'id': 'sentry.rules.actions.notify_event_service.NotifyEventAction',
-                        'service': 'mail',
-                    }],
-                    'conditions': [{
-                        'id': 'sentry.rules.conditions.every_event.EveryEventCondition',
-                    }],
-                }
-            ),
+        mock_processor.return_value.apply.return_value = [
+            (mock_callback, mock_futures),
         ]
 
         post_process_group(
             event=event,
-            is_new=False,
+            is_new=True,
             is_regression=False,
             is_sample=False,
         )
 
-        mock_get_rules.assert_called_once_with(self.project)
+        mock_processor.assert_called_once_with(event, True, False, False)
+        mock_processor.return_value.apply.assert_called_once_with()
 
-        assert len(mock_execute_rule.apply_async.mock_calls) == 1
+        mock_callback.assert_called_once_with(event, mock_futures)
 
-        mock_execute_rule.apply_async.reset_mock()
+    @patch('sentry.tasks.post_process.record_affected_user', Mock())
+    @patch('sentry.rules.processor.RuleProcessor')
+    def test_group_refresh(self, mock_processor):
+        group1 = self.create_group(project=self.project)
+        group2 = self.create_group(project=self.project)
+        event = self.create_event(group=group1)
+
+        assert event.group_id == group1.id
+        assert event.group == group1
+
+        with self.tasks():
+            merge_group(group1.id, group2.id)
+
+        mock_callback = Mock()
+        mock_futures = [Mock()]
+
+        mock_processor.return_value.apply.return_value = [
+            (mock_callback, mock_futures),
+        ]
 
         post_process_group(
             event=event,
@@ -125,105 +63,60 @@ class PostProcessGroupTest(TestCase):
             is_sample=False,
         )
 
-        assert len(mock_execute_rule.apply_async.mock_calls) == 2
-
-        mock_execute_rule.apply_async.reset_mock()
-
-        post_process_group(
-            event=event,
-            is_new=True,
-            is_regression=False,
-            is_sample=False,
-        )
-
-        assert len(mock_execute_rule.apply_async.mock_calls) == 2
+        assert event.group == group2
+        assert event.group_id == group2.id
 
 
-class ExecuteRuleTest(TestCase):
-    @patch('sentry.tasks.post_process.rules')
-    def test_simple(self, mock_rules):
+class IndexEventTagsTest(TestCase):
+    def test_simple(self):
         group = self.create_group(project=self.project)
         event = self.create_event(group=group)
-        action_data = {'id': 'a.rule.id', 'foo': 'bar'}
-        rule = Rule.objects.create(
-            project=event.project,
-            data={
-                'actions': [
-                    action_data,
-                ],
-            }
+
+        with self.tasks():
+            index_event_tags.delay(
+                event_id=event.id,
+                group_id=group.id,
+                project_id=self.project.id,
+                tags=[('foo', 'bar'), ('biz', 'baz')],
+            )
+
+        tags = list(EventTag.objects.filter(
+            event_id=event.id,
+        ).values_list('key_id', 'value_id'))
+        assert len(tags) == 2
+
+        tagkey = TagKey.objects.get(
+            key='foo',
+            project=self.project,
         )
-
-        state = EventState(
-            is_new=True,
-            is_regression=False,
-            is_sample=True,
-            rule_is_active=False,
+        tagvalue = TagValue.objects.get(
+            key='foo',
+            value='bar',
+            project=self.project,
         )
+        assert (tagkey.id, tagvalue.id) in tags
 
-        execute_rule(
-            rule_id=rule.id,
-            event=event,
-            state=state,
+        tagkey = TagKey.objects.get(
+            key='biz',
+            project=self.project,
         )
-
-        mock_rules.get.assert_called_once_with('a.rule.id')
-        mock_rule_inst = mock_rules.get.return_value
-        mock_rule_inst.assert_called_once_with(self.project, data=action_data)
-        mock_rule_inst.return_value.after.assert_called_once_with(
-            event=event,
-            state=state,
+        tagvalue = TagValue.objects.get(
+            key='biz',
+            value='baz',
+            project=self.project,
         )
+        assert (tagkey.id, tagvalue.id) in tags
 
+        # ensure it safely handles repeat runs
+        with self.tasks():
+            index_event_tags.delay(
+                event_id=event.id,
+                group_id=group.id,
+                project_id=self.project.id,
+                tags=[('foo', 'bar'), ('biz', 'baz')],
+            )
 
-class RecordAffectedUserTest(TestCase):
-    def test_simple(self):
-        event = Group.objects.from_kwargs(1, message='foo', **{
-            'sentry.interfaces.User': {
-                'email': 'foo@example.com',
-            },
-        })
-
-        with patch.object(Group.objects, 'add_tags') as add_tags:
-            record_affected_user(event=event)
-
-            add_tags.assert_called_once(event.group, [
-                ('sentry:user', 'email:foo@example.com', {
-                    'id': None,
-                    'email': 'foo@example.com',
-                    'username': None,
-                    'data': None,
-                })
-            ])
-
-
-class RecordAffectedCodeTest(TestCase):
-    def test_simple(self):
-        event = Group.objects.from_kwargs(1, message='foo', **{
-            'sentry.interfaces.Exception': {
-                'values': [{
-                    'type': 'TypeError',
-                    'value': 'test',
-                    'stacktrace': {
-                        'frames': [{
-                            'function': 'bar',
-                            'filename': 'foo.py',
-                            'in_app': True,
-                        }],
-                    },
-                }],
-            },
-        })
-
-        with patch.object(Group.objects, 'add_tags') as add_tags:
-            record_affected_code(event=event)
-
-            add_tags.assert_called_once_with(event.group, [
-                ('sentry:filename', '1effb24729ae4c43efa36b460511136a', {
-                    'filename': 'foo.py',
-                }),
-                ('sentry:function', '7823c20ad591da0bbb78d083c118609c', {
-                    'filename': 'foo.py',
-                    'function': 'bar',
-                })
-            ])
+        queryset = EventTag.objects.filter(
+            event_id=event.id,
+        )
+        assert queryset.count() == 2

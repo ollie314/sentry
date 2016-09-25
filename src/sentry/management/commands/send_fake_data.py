@@ -10,6 +10,7 @@ from __future__ import absolute_import
 import datetime
 import itertools
 import random
+import six
 import time
 
 from django.core.management.base import BaseCommand, CommandError, make_option
@@ -36,13 +37,13 @@ def funcs():
     #     return client.capture('Query', query=queries.next(), engine=engine.next(), time_spent=duration, data={'logger': loggers.next(), 'site': 'sql'})
 
     def exception(client):
-        timestamp = datetime.datetime.utcnow() - datetime.timedelta(seconds=timestamps.next())
+        timestamp = datetime.datetime.utcnow() - datetime.timedelta(seconds=six.next(timestamps))
         try:
-            raise exceptions.next()
+            raise six.next(exceptions)
         except Exception:
-            email = emails.next()
+            email = six.next(emails)
             return client.captureException(data={
-                'logger': loggers.next(),
+                'logger': six.next(loggers),
                 'site': 'web',
                 'sentry.interfaces.User': {
                     'id': email,
@@ -57,7 +58,7 @@ class Command(BaseCommand):
     help = 'Sends fake data to the internal Sentry project'
 
     option_list = BaseCommand.option_list + (
-        make_option('--project', dest='project', help="project ID or team-slug/project-slug"),
+        make_option('--project', dest='project', help="project ID or organization-slug/project-slug"),
         make_option('--num', dest='num_events', type=int),
     )
 
@@ -72,10 +73,10 @@ class Command(BaseCommand):
             if options['project'].isdigit():
                 project = Project.objects.get(id=options['project'])
             elif '/' in options['project']:
-                t_slug, p_slug = options['project'].split('/', 1)
-                project = Project.objects.get(slug=p_slug, team__slug=t_slug)
+                o_slug, p_slug = options['project'].split('/', 1)
+                project = Project.objects.get(slug=p_slug, organization__slug=o_slug)
             else:
-                raise CommandError('Project must be specified as team-slug/project-slug or a project id')
+                raise CommandError('Project must be specified as organization-slug/project-slug or a project id')
 
         client.project = project.id
 

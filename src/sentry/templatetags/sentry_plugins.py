@@ -9,7 +9,7 @@ from __future__ import absolute_import
 
 from django import template
 
-from sentry.plugins import plugins
+from sentry.plugins import Annotation, plugins
 from sentry.utils.safe import safe_execute
 
 register = template.Library()
@@ -20,13 +20,19 @@ def get_actions(group, request):
     project = group.project
 
     action_list = []
-    for plugin in plugins.for_project(project):
-        results = safe_execute(plugin.actions, request, group, action_list)
+    for plugin in plugins.for_project(project, version=1):
+        results = safe_execute(plugin.actions, request, group, action_list,
+                               _with_transaction=False)
 
         if not results:
             continue
 
         action_list = results
+
+    for plugin in plugins.for_project(project, version=2):
+        for action in (safe_execute(plugin.get_actions, request, group,
+                                    _with_transaction=False) or ()):
+            action_list.append(action)
 
     return [(a[0], a[1], request.path == a[1]) for a in action_list]
 
@@ -37,7 +43,8 @@ def get_panels(group, request):
 
     panel_list = []
     for plugin in plugins.for_project(project):
-        results = safe_execute(plugin.panels, request, group, panel_list)
+        results = safe_execute(plugin.panels, request, group, panel_list,
+                               _with_transaction=False)
 
         if not results:
             continue
@@ -52,27 +59,42 @@ def get_widgets(group, request):
     project = group.project
 
     for plugin in plugins.for_project(project):
-        resp = safe_execute(plugin.widget, request, group)
+        resp = safe_execute(plugin.widget, request, group,
+                            _with_transaction=False)
 
         if resp:
             yield resp.render(request)
 
 
 @register.filter
-def get_tags(group, request=None):
+def get_legacy_annotations(group, request=None):
     project = group.project
 
-    tag_list = []
-    for plugin in plugins.for_project(project):
-        results = safe_execute(plugin.tags, request, group, tag_list)
+    annotation_list = []
+    for plugin in plugins.for_project(project, version=1):
+        results = safe_execute(plugin.tags, request, group, annotation_list,
+                               _with_transaction=False)
 
         if not results:
             continue
 
-        tag_list = results
+        annotation_list = results
 
-    for tag in tag_list:
-        yield tag
+    return annotation_list
+
+
+@register.filter
+def get_annotations(group, request=None):
+    project = group.project
+
+    annotation_list = []
+    for plugin in plugins.for_project(project, version=2):
+        for value in (safe_execute(plugin.get_annotations, group=group, _with_transaction=False) or ()):
+            annotation = safe_execute(Annotation, _with_transaction=False, **value)
+            if annotation:
+                annotation_list.append(annotation)
+
+    return annotation_list
 
 
 @register.simple_tag
@@ -99,7 +121,7 @@ def handle_before_events(request, event_list):
 @register.filter
 def get_plugins(project):
     results = []
-    for plugin in plugins.for_project(project):
+    for plugin in plugins.for_project(project, version=None):
         if plugin.has_project_conf():
             results.append(plugin)
     return results
@@ -108,7 +130,6 @@ def get_plugins(project):
 @register.filter
 def get_plugins_with_status(project):
     return [
-        (plugin, safe_execute(plugin.is_enabled, project))
-        for plugin in plugins.all()
-        if plugin.can_enable_for_projects()
+        (plugin, safe_execute(plugin.is_enabled, project, _with_transaction=False))
+        for plugin in plugins.configurable_for_project(project, version=None)
     ]
