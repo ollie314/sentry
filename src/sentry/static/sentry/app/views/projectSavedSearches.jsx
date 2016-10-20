@@ -31,6 +31,7 @@ const SavedSearchRow = React.createClass({
     if (this.state.loading)
       return;
 
+    /* eslint no-alert:0*/
     if (!window.confirm('Are you sure you want to remove this?'))
       return;
 
@@ -211,7 +212,7 @@ const ProjectSavedSearches = React.createClass({
   renderResults() {
     let {orgId, projectId} = this.props.params;
     return (
-      <div className="panel panel-default">
+      <div className="panel panel-default horizontal-scroll">
         <table className="table">
           <thead>
             <tr>

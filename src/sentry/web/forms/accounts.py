@@ -451,10 +451,12 @@ class NotificationSettingsForm(forms.Form):
     )
     workflow_notifications = forms.BooleanField(
         label=_('Receive updates for all issues by default'),
+        help_text=_('You\'ll always receive notifications if you\'re explicitly participating on an issue.'),
         required=False,
     )
     self_notifications = forms.BooleanField(
         label=_('Receive notifications about my own activity'),
+        help_text=_('Enable this if you wish to receive emails for your own actions, as well as others.'),
         required=False,
     )
 
@@ -561,8 +563,7 @@ class ProjectEmailOptionsForm(forms.Form):
 
         self.fields['alert'].initial = has_alerts
         self.fields['workflow'].initial = has_workflow
-        self.fields['email'].initial = UserOption.objects.get_value(
-            user, project, 'mail:email', None) or alert_email
+        self.fields['email'].initial = specified_email or alert_email or user.email
 
     def save(self):
         UserOption.objects.set_value(

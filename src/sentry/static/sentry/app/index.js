@@ -45,13 +45,15 @@ export default {
   ReactDOM: require('react-dom'),
   Reflux: require('reflux'),
   Router: require('react-router'),
+  underscore: require('underscore'),
 
   Sentry: {
     api: require('./api'),
     routes: require('./routes'),
     plugins: {
       add: plugins.add,
-      BasePlugin: plugins.BasePlugin
+      BasePlugin: plugins.BasePlugin,
+      DefaultIssuePlugin: plugins.DefaultIssuePlugin
     },
 
     createHistory: require('history/lib/createBrowserHistory'),
@@ -60,6 +62,7 @@ export default {
     AvatarSettings: require('./components/avatarSettings'),
     mixins: {
       ApiMixin: require('./mixins/apiMixin'),
+      TooltipMixin: require('./mixins/tooltip')
     },
     BarChart: require('./components/barChart'),
     i18n: require('./locale'),
@@ -68,6 +71,8 @@ export default {
     DateTime: require('./components/dateTime'),
     DropdownLink: require('./components/dropdownLink'),
     FlotChart: require('./components/flotChart'),
+    Form: require('./components/forms/form'),
+    FormState: require('./components/forms/index').FormState,
     HookStore: require('./stores/hookStore'),
     Indicators: require('./components/indicators'),
     IndicatorStore: require('./stores/indicatorStore'),
@@ -76,11 +81,13 @@ export default {
     ListLink: require('./components/listLink'),
     MenuItem: require('./components/menuItem'),
     OrganizationHomeContainer: require('./components/organizations/homeContainer'),
+    OrganizationsLoader: require('./components/organizations/organizationsLoader'),
     Pagination: require('./components/pagination'),
     PluginConfig: require('./components/pluginConfig'),
     ProjectIssueTracking: require('./views/projectIssueTracking'),
     ProjectSelector: require('./components/projectHeader/projectSelector'),
     RuleEditor: require('./views/ruleEditor'),
+    Sidebar: require('./components/sidebar'),
     StackedBarChart: require('./components/stackedBarChart'),
     TimeSince: require('./components/timeSince'),
     TodoList: require('./components/todos'),

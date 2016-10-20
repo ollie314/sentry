@@ -6,15 +6,17 @@ import logging
 import re
 import base64
 import six
+import time
 import zlib
 
 from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
-from django.utils.encoding import force_bytes, force_text
+from django.utils.encoding import force_text
 from collections import namedtuple
 from os.path import splitext
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, Timeout
 from six.moves.urllib.parse import urlparse, urljoin, urlsplit
+from libsourcemap import from_json as view_from_json
 
 # In case SSL is unavailable (light builds) we can't import this here.
 try:
@@ -33,9 +35,9 @@ from sentry.utils.files import compress_file
 from sentry.utils.hashlib import md5_text
 from sentry.utils.http import is_valid_origin
 from sentry.utils.strings import truncatechars
+from sentry.utils import metrics
 
 from .cache import SourceCache, SourceMapCache
-from .sourcemaps import sourcemap_to_index, find_source, get_inline_content_sources
 
 
 # number of surrounding lines (on each side) to fetch
@@ -75,7 +77,7 @@ def expose_url(url):
     if url[:5] == 'data:':
         return u'<data url>'
     url = truncatechars(url, MAX_URL_LENGTH)
-    if isinstance(url, bytes):
+    if isinstance(url, six.binary_type):
         url = url.decode('utf-8', 'replace')
     return url
 
@@ -262,8 +264,9 @@ def fetch_release_file(filename, release):
         logger.debug('Found release artifact %r (id=%s, release_id=%s)',
                      filename, releasefile.id, release.id)
         try:
-            with releasefile.file.getfile() as fp:
-                z_body, body = compress_file(fp)
+            with metrics.timer('sourcemaps.release_file_read'):
+                with releasefile.file.getfile() as fp:
+                    z_body, body = compress_file(fp)
         except Exception as e:
             logger.exception(six.text_type(e))
             cache.set(cache_key, -1, 3600)
@@ -310,7 +313,8 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
     Attempts to fetch from the cache.
     """
     if release:
-        result = fetch_release_file(url, release)
+        with metrics.timer('sourcemaps.release_file'):
+            result = fetch_release_file(url, release)
     else:
         result = None
 
@@ -353,57 +357,96 @@ def fetch_file(url, project=None, release=None, allow_scraping=True):
 
         logger.debug('Fetching %r from the internet', url)
 
-        http_session = http.build_session()
-        try:
-            response = http_session.get(
-                url,
-                allow_redirects=True,
-                verify=False,
-                headers=headers,
-                timeout=settings.SENTRY_SOURCE_FETCH_TIMEOUT,
-            )
-        except Exception as exc:
-            logger.debug('Unable to fetch %r', url, exc_info=True)
-            if isinstance(exc, RestrictedIPAddress):
-                error = {
-                    'type': EventError.RESTRICTED_IP,
-                    'url': expose_url(url),
-                }
-            elif isinstance(exc, SuspiciousOperation):
-                error = {
-                    'type': EventError.SECURITY_VIOLATION,
-                    'url': expose_url(url),
-                }
-            elif isinstance(exc, (RequestException, ZeroReturnError)):
-                error = {
-                    'type': EventError.JS_GENERIC_FETCH_ERROR,
-                    'value': six.text_type(type(exc)),
-                    'url': expose_url(url),
-                }
-            else:
-                logger.exception(six.text_type(exc))
-                error = {
-                    'type': EventError.UNKNOWN_ERROR,
-                    'url': expose_url(url),
-                }
+        with metrics.timer('sourcemaps.fetch'):
+            http_session = http.build_session()
+            response = None
+            try:
+                try:
+                    start = time.time()
+                    response = http_session.get(
+                        url,
+                        allow_redirects=True,
+                        verify=False,
+                        headers=headers,
+                        timeout=settings.SENTRY_SOURCE_FETCH_SOCKET_TIMEOUT,
+                        stream=True,
+                    )
 
-            # TODO(dcramer): we want to be less aggressive on disabling domains
-            cache.set(domain_key, error or '', 300)
-            logger.warning('Disabling sources to %s for %ss', domain, 300,
-                           exc_info=True)
-            raise CannotFetchSource(error)
+                    try:
+                        cl = int(response.headers['content-length'])
+                    except (LookupError, ValueError):
+                        cl = 0
+                    if cl > settings.SENTRY_SOURCE_FETCH_MAX_SIZE:
+                        raise OverflowError()
 
-        # requests' attempts to use chardet internally when no encoding is found
-        # and we want to avoid that slow behavior
-        if not response.encoding:
-            response.encoding = 'utf-8'
+                    contents = []
+                    cl = 0
 
-        body = response.text
-        z_body = zlib.compress(force_bytes(body))
-        headers = {k.lower(): v for k, v in response.headers.items()}
+                    # Only need to even attempt to read the response body if we
+                    # got a 200 OK
+                    if response.status_code == 200:
+                        for chunk in response.iter_content(16 * 1024):
+                            if time.time() - start > settings.SENTRY_SOURCE_FETCH_TIMEOUT:
+                                raise Timeout()
+                            contents.append(chunk)
+                            cl += len(chunk)
+                            if cl > settings.SENTRY_SOURCE_FETCH_MAX_SIZE:
+                                raise OverflowError()
 
-        cache.set(cache_key, (headers, z_body, response.status_code), 60)
-        result = (headers, body, response.status_code)
+                except Exception as exc:
+                    logger.debug('Unable to fetch %r', url, exc_info=True)
+                    if isinstance(exc, RestrictedIPAddress):
+                        error = {
+                            'type': EventError.RESTRICTED_IP,
+                            'url': expose_url(url),
+                        }
+                    elif isinstance(exc, SuspiciousOperation):
+                        error = {
+                            'type': EventError.SECURITY_VIOLATION,
+                            'url': expose_url(url),
+                        }
+                    elif isinstance(exc, Timeout):
+                        error = {
+                            'type': EventError.JS_FETCH_TIMEOUT,
+                            'url': expose_url(url),
+                            'timeout': settings.SENTRY_SOURCE_FETCH_TIMEOUT,
+                        }
+                    elif isinstance(exc, OverflowError):
+                        error = {
+                            'type': EventError.JS_TOO_LARGE,
+                            'url': expose_url(url),
+                            # We want size in megabytes to format nicely
+                            'max_size': float(settings.SENTRY_SOURCE_FETCH_MAX_SIZE) / 1024 / 1024,
+                        }
+                    elif isinstance(exc, (RequestException, ZeroReturnError)):
+                        error = {
+                            'type': EventError.JS_GENERIC_FETCH_ERROR,
+                            'value': six.text_type(type(exc)),
+                            'url': expose_url(url),
+                        }
+                    else:
+                        logger.exception(six.text_type(exc))
+                        error = {
+                            'type': EventError.UNKNOWN_ERROR,
+                            'url': expose_url(url),
+                        }
+
+                    # TODO(dcramer): we want to be less aggressive on disabling domains
+                    cache.set(domain_key, error or '', 300)
+                    logger.warning('Disabling sources to %s for %ss', domain, 300,
+                                   exc_info=True)
+                    raise CannotFetchSource(error)
+
+                body = b''.join(contents)
+                z_body = zlib.compress(body)
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                text_body = body.decode(response.encoding or 'utf-8', 'replace')
+
+                cache.set(cache_key, (headers, z_body, response.status_code), 60)
+                result = (headers, text_body, response.status_code)
+            finally:
+                if response is not None:
+                    response.close()
 
     if result[2] != 200:
         logger.debug('HTTP %s when fetching %r', result[2], url,
@@ -451,19 +494,14 @@ def fetch_sourcemap(url, project=None, release=None, allow_scraping=True):
     if is_data_uri(url):
         body = base64.b64decode(url[BASE64_PREAMBLE_LENGTH:])
     else:
+        # TODO(mattrobenolt): this is returning unicodes, and there's no
+        # reason we need to do this. We operate on this payload as bytes.
         result = fetch_file(url, project=project, release=release,
                             allow_scraping=allow_scraping)
         body = result.body
 
     try:
-        # According to various specs[1][2] a SourceMap may be prefixed to force
-        # a Javascript load error.
-        # [1] https://docs.google.com/document/d/1U1RGAehQwRypUTovF1KRlpiOFze0b-_2gc6fAH0KY0k/edit#heading=h.h7yy76c5il9v
-        # [2] http://www.html5rocks.com/en/tutorials/developertools/sourcemaps/#toc-xssi
-        if body.startswith((u")]}'\n", u")]}\n")):
-            body = body.split(u'\n', 1)[1]
-
-        return sourcemap_to_index(body)
+        return view_from_json(body)
     except Exception as exc:
         # This is in debug because the product shows an error already.
         logger.debug(six.text_type(exc), exc_info=True)
@@ -584,7 +622,8 @@ class SourceProcessor(object):
         # all of these methods assume mutation on the original
         # objects rather than re-creation
         self.populate_source_cache(frames, release)
-        expand_errors, sourcemap_applied = self.expand_frames(frames, release)
+        with metrics.timer('sourcemaps.expand_frames'):
+            expand_errors, sourcemap_applied = self.expand_frames(frames, release)
         errors.extend(expand_errors or [])
         self.ensure_module_names(frames)
         self.fix_culprit(data, stacktraces)
@@ -656,8 +695,8 @@ class SourceProcessor(object):
                 frame.module = generate_module(frame.abs_path)
 
     def expand_frames(self, frames, release):
-        last_state = None
-        state = None
+        last_token = None
+        token = None
 
         cache = self.cache
         sourcemaps = self.sourcemaps
@@ -678,14 +717,14 @@ class SourceProcessor(object):
                 logger.debug('No source found for %s', frame.abs_path)
                 continue
 
-            sourcemap_url, sourcemap_idx = sourcemaps.get_link(frame.abs_path)
-            if sourcemap_idx and frame.colno is None:
+            sourcemap_url, sourcemap_view = sourcemaps.get_link(frame.abs_path)
+            if sourcemap_view and frame.colno is None:
                 all_errors.append({
                     'type': EventError.JS_NO_COLUMN,
                     'url': expose_url(frame.abs_path),
                 })
-            elif sourcemap_idx:
-                last_state = state
+            elif sourcemap_view:
+                last_token = token
 
                 if is_data_uri(sourcemap_url):
                     sourcemap_label = frame.abs_path
@@ -695,9 +734,12 @@ class SourceProcessor(object):
                 sourcemap_label = expose_url(sourcemap_label)
 
                 try:
-                    state = find_source(sourcemap_idx, frame.lineno, frame.colno)
+                    # Errors are 1-indexed in the frames, so we need to -1 to get
+                    # zero-indexed value from tokens.
+                    assert frame.lineno > 0, "line numbers are 1-indexed"
+                    token = sourcemap_view.lookup_token(frame.lineno - 1, frame.colno)
                 except Exception:
-                    state = None
+                    token = None
                     all_errors.append({
                         'type': EventError.JS_INVALID_SOURCEMAP_LOCATION,
                         'column': frame.colno,
@@ -717,8 +759,8 @@ class SourceProcessor(object):
 
                 sourcemap_applied = True
 
-                if state is not None:
-                    abs_path = urljoin(sourcemap_url, state.src)
+                if token is not None:
+                    abs_path = urljoin(sourcemap_url, token.src)
 
                     logger.debug('Mapping compressed source %r to mapping in %r', frame.abs_path, abs_path)
                     source = self.get_source(abs_path, release)
@@ -733,18 +775,18 @@ class SourceProcessor(object):
                             'url': expose_url(abs_path),
                         })
 
-                if state is not None:
-                    # SourceMap's return zero-indexed lineno's
-                    frame.lineno = state.src_line + 1
-                    frame.colno = state.src_col
+                if token is not None:
+                    # Token's return zero-indexed lineno's
+                    frame.lineno = token.src_line + 1
+                    frame.colno = token.src_col
                     # The offending function is always the previous function in the stack
                     # Honestly, no idea what the bottom most frame is, so we're ignoring that atm
-                    if last_state:
-                        frame.function = last_state.name or frame.function
+                    if last_token:
+                        frame.function = last_token.name or frame.function
                     else:
-                        frame.function = state.name or frame.function
+                        frame.function = token.name or frame.function
 
-                    filename = state.src
+                    filename = token.src
                     # special case webpack support
                     # abs_path will always be the full path with webpack:/// prefix.
                     # filename will be relative to that
@@ -835,7 +877,7 @@ class SourceProcessor(object):
 
         # pull down sourcemap
         try:
-            sourcemap_idx = fetch_sourcemap(
+            sourcemap_view = fetch_sourcemap(
                 sourcemap_url,
                 project=self.project,
                 release=release,
@@ -845,12 +887,24 @@ class SourceProcessor(object):
             cache.add_error(filename, exc.data)
             return
 
-        sourcemaps.add(sourcemap_url, sourcemap_idx)
+        sourcemaps.add(sourcemap_url, sourcemap_view)
 
         # cache any inlined sources
-        inline_sources = get_inline_content_sources(sourcemap_idx, sourcemap_url)
-        for source in inline_sources:
-            self.cache.add(*source)
+        # inline_sources = sourcemap_view.get_inline_content_sources(sourcemap_url)
+        for src_id, source in sourcemap_view.iter_sources():
+            # TODO(mattrobenolt): This is slightly less than ideal,
+            # but it's the simplest path for now.
+            # Ideally, we would do this lazily.
+            content = sourcemap_view.get_source_contents(src_id)
+            if content is not None:
+                # TODO(mattrobenolt): This is gross. libsourcemap returns back
+                # bytes, and our internal stuff assumed unicode. So everything else in
+                # the pipeline assumes unicode and working with bytes is harder.
+                # So let's coerce here to unicodes just to conform to API for both,
+                # but remove this and handle bytes down the line when done.
+                if isinstance(content, six.binary_type):
+                    content = content.decode('utf-8', errors='replace')
+                self.cache.add(urljoin(sourcemap_url, source), content.split(u'\n'))
 
     def populate_source_cache(self, frames, release):
         """

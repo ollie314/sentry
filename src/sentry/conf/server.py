@@ -210,7 +210,8 @@ MIDDLEWARE_CLASSES = (
     'sentry.middleware.sudo.SudoMiddleware',
     'sentry.middleware.superuser.SuperuserMiddleware',
     'sentry.middleware.locale.SentryLocaleMiddleware',
-    'sentry.middleware.social_auth.SentrySocialAuthExceptionMiddleware',
+    # TODO(dcramer): kill this once we verify its safe
+    # 'sentry.middleware.social_auth.SentrySocialAuthExceptionMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'sentry.debug.middleware.DebugMiddleware',
 )
@@ -329,6 +330,9 @@ SOCIAL_AUTH_PIPELINE = (
     'social_auth.backends.pipeline.user.update_user_details',
     'social_auth.backends.pipeline.misc.save_status_to_session',
 )
+SOCIAL_AUTH_REVOKE_TOKENS_ON_DISCONNECT = True
+SOCIAL_AUTH_LOGIN_REDIRECT_URL = '/account/settings/identities/'
+SOCIAL_AUTH_ASSOCIATE_ERROR_URL = SOCIAL_AUTH_LOGIN_REDIRECT_URL
 
 INITIAL_CUSTOM_USER_MIGRATION = '0108_fix_user'
 
@@ -402,7 +406,9 @@ CELERY_QUEUES = [
     Queue('digests.delivery', routing_key='digests.delivery'),
     Queue('digests.scheduling', routing_key='digests.scheduling'),
     Queue('email', routing_key='email'),
-    Queue('events', routing_key='events'),
+    Queue('events.preprocess_event', routing_key='events.preprocess_event'),
+    Queue('events.process_event', routing_key='events.process_event'),
+    Queue('events.save_event', routing_key='events.save_event'),
     Queue('merge', routing_key='merge'),
     Queue('options', routing_key='options'),
     Queue('reports.deliver', routing_key='reports.deliver'),
@@ -648,6 +654,7 @@ SENTRY_FEATURES = {
     'projects:quotas': True,
     'projects:plugins': True,
     'projects:dsym': False,
+    'workflow:release-emails': False,
 }
 
 # Default time zone for localization in the UI.
@@ -876,6 +883,12 @@ SENTRY_GRAVATAR_BASE_URL = 'https://secure.gravatar.com'
 # Timeout (in seconds) for fetching remote source files (e.g. JS)
 SENTRY_SOURCE_FETCH_TIMEOUT = 5
 
+# Timeout (in seconds) for socket operations when fetching remote source files
+SENTRY_SOURCE_FETCH_SOCKET_TIMEOUT = 2
+
+# Maximum content length for source files before we abort fetching
+SENTRY_SOURCE_FETCH_MAX_SIZE = 40 * 1024 * 1024
+
 # List of IP subnets which should not be accessible
 SENTRY_DISALLOWED_IPS = ()
 
@@ -1019,12 +1032,16 @@ SUDO_URL = 'sentry-sudo'
 SDK_VERSIONS = {
     'raven-js': '3.3.0',
     'raven-python': '5.23.0',
+    'sentry-laravel': '0.4.0',
+    'sentry-php': '1.5.0',
 }
 
 SDK_URLS = {
-    'raven-js': 'https://docs.sentry.io/hosted/clients/javascript/',
-    'raven-python': 'https://docs.sentry.io/hosted/clients/python/',
-    'raven-swift': 'https://docs.sentry.io/hosted/clients/cocoa/',
+    'raven-js': 'https://docs.sentry.io/clients/javascript/',
+    'raven-python': 'https://docs.sentry.io/clients/python/',
+    'raven-swift': 'https://docs.sentry.io/clients/cocoa/',
+    'sentry-php': 'https://docs.sentry.io/clients/php/',
+    'sentry-laravel': 'https://docs.sentry.io/clients/php/integrations/laravel/',
 }
 
 DEPRECATED_SDKS = {

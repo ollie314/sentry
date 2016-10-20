@@ -1,6 +1,7 @@
 import React from 'react';
 
 import ApiMixin from '../mixins/apiMixin';
+import Duration from '../components/duration';
 import IndicatorStore from '../stores/indicatorStore';
 import ListLink from '../components/listLink';
 import LoadingError from '../components/loadingError';
@@ -27,6 +28,7 @@ const RuleRow = React.createClass({
   },
 
   onDelete() {
+    /* eslint no-alert:0*/
     if (!confirm('Are you sure you want to remove this rule?'))
       return;
     if (this.state.loading)
@@ -88,7 +90,7 @@ const RuleRow = React.createClass({
             <div className="col-md-6">
               {data.actions.length !== 0 &&
                 <div>
-                  <h6>Take these actions:</h6>
+                  <h6>Take these actions at most <strong>once every <Duration seconds={data.frequency * 60} /></strong>:</h6>
                   <table className="actions-list table">
                   {data.actions.map((action) => {
                     return (

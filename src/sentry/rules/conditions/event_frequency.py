@@ -45,12 +45,6 @@ class BaseEventFrequencyCondition(EventCondition):
         super(BaseEventFrequencyCondition, self).__init__(*args, **kwargs)
 
     def passes(self, event, state):
-        # when a rule is not active (i.e. it hasnt gone from inactive -> active)
-        # it means that we already notified the user about this condition and
-        # shouldn't spam them again
-        if state.rule_is_active:
-            return False
-
         interval = self.get_option('interval')
         try:
             value = int(self.get_option('value'))
@@ -60,18 +54,9 @@ class BaseEventFrequencyCondition(EventCondition):
         if not interval:
             return False
 
-        now = timezone.now()
-
-        # XXX(dcramer): hardcode 30 minute frequency until rules support choices
-        if state.rule_last_active and state.rule_last_active > (now - timedelta(minutes=30)):
-            return False
-
         current_value = self.get_rate(event, interval)
 
         return current_value > value
-
-    def clear_cache(self, event):
-        event._rate_cache = {}
 
     def query(self, event, start, end):
         """
@@ -79,28 +64,21 @@ class BaseEventFrequencyCondition(EventCondition):
         raise NotImplementedError  # subclass must implement
 
     def get_rate(self, event, interval):
-        if not hasattr(event, '_rate_cache'):
-            event._rate_cache = {}
+        end = timezone.now()
+        if interval == Interval.ONE_MINUTE:
+            start = end - timedelta(minutes=1)
+        elif interval == Interval.ONE_HOUR:
+            start = end - timedelta(hours=1)
+        elif interval == Interval.ONE_DAY:
+            start = end - timedelta(hours=24)
+        else:
+            raise ValueError(interval)
 
-        result = event._rate_cache.get(interval)
-        if result is None:
-            end = timezone.now()
-            if interval == Interval.ONE_MINUTE:
-                start = end - timedelta(minutes=1)
-            elif interval == Interval.ONE_HOUR:
-                start = end - timedelta(hours=1)
-            elif interval == Interval.ONE_DAY:
-                start = end - timedelta(hours=24)
-            else:
-                raise ValueError(interval)
-
-            event._rate_cache[interval] = result = self.query(
-                event,
-                start,
-                end,
-            )
-
-        return result
+        return self.query(
+            event,
+            start,
+            end,
+        )
 
 
 class EventFrequencyCondition(BaseEventFrequencyCondition):

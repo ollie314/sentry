@@ -25,6 +25,7 @@ from sentry.web.frontend.auth_logout import AuthLogoutView
 from sentry.web.frontend.auth_organization_login import \
     AuthOrganizationLoginView
 from sentry.web.frontend.auth_provider_login import AuthProviderLoginView
+from sentry.web.frontend.auth_close import AuthCloseView
 from sentry.web.frontend.create_organization import CreateOrganizationView
 from sentry.web.frontend.create_organization_member import \
     CreateOrganizationMemberView
@@ -133,8 +134,8 @@ if getattr(settings, 'DEBUG_VIEWS', settings.DEBUG):
 
     urlpatterns += patterns(
         '',
-        url(r'^debug/mail/new-event/$',
-            sentry.web.frontend.debug.mail.new_event),
+        url(r'^debug/mail/alert/$',
+            sentry.web.frontend.debug.mail.alert),
         url(r'^debug/mail/note/$',
             DebugNoteEmailView.as_view()),
         url(r'^debug/mail/new-release/$',
@@ -225,6 +226,8 @@ urlpatterns += patterns(
         name='sentry-reactivate-account'),
     url(r'^auth/register/$', AuthLoginView.as_view(),
         name='sentry-register'),
+    url(r'^auth/close/$', AuthCloseView.as_view(),
+        name='sentry-auth-close'),
 
     # Account
     url(r'^login-redirect/$', accounts.login_redirect,
@@ -238,7 +241,7 @@ urlpatterns += patterns(
         name='sentry-account-recover'),
     url(r'^account/recover/confirm/(?P<user_id>[\d]+)/(?P<hash>[0-9a-zA-Z]+)/$', accounts.recover_confirm,
         name='sentry-account-recover-confirm'),
-    url(r'^account/settings/$', accounts.settings,
+    url(r'^account/settings/$', accounts.account_settings,
         name='sentry-account-settings'),
     url(r'^account/settings/2fa/$', accounts.twofactor_settings,
         name='sentry-account-settings-2fa'),
@@ -260,6 +263,9 @@ urlpatterns += patterns(
         name='sentry-account-settings-appearance'),
     url(r'^account/settings/identities/$', accounts.list_identities,
         name='sentry-account-settings-identities'),
+    url(r'^account/settings/identities/(?P<identity_id>[^\/]+)/disconnect/$',
+        accounts.disconnect_identity,
+        name='sentry-account-disconnect-identity'),
     url(r'^account/settings/notifications/$', AccountNotificationView.as_view(),
         name='sentry-account-settings-notifications'),
     url(r'^account/settings/security/$', AccountSecurityView.as_view(),

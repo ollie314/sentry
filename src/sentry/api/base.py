@@ -1,12 +1,10 @@
 from __future__ import absolute_import
 
-__all__ = ['DocSection', 'Endpoint', 'StatsMixin']
-
 import logging
-import six
 import time
-
 from datetime import datetime, timedelta
+
+import six
 from django.conf import settings
 from django.utils.http import urlquote
 from django.views.decorators.csrf import csrf_exempt
@@ -28,6 +26,7 @@ from .authentication import ApiKeyAuthentication, TokenAuthentication
 from .paginator import Paginator
 from .permissions import NoPermission
 
+__all__ = ['DocSection', 'Endpoint', 'StatsMixin']
 
 ONE_MINUTE = 60
 ONE_HOUR = ONE_MINUTE * 60
@@ -89,11 +88,7 @@ class Endpoint(APIView):
             import sys
             import traceback
             sys.stderr.write(traceback.format_exc())
-            event = raven.captureException(request=request)
-            if event:
-                event_id = raven.get_ident(event)
-            else:
-                event_id = None
+            event_id = raven.captureException(request=request)
             context = {
                 'detail': 'Internal Error',
                 'errorId': event_id,
@@ -128,6 +123,17 @@ class Endpoint(APIView):
         audit_logger.info(entry.get_event_display(), extra=extra)
 
         return entry
+
+    def initialize_request(self, request, *args, **kwargs):
+        rv = super(Endpoint, self).initialize_request(request, *args, **kwargs)
+        # If our request is being made via our internal API client, we need to
+        # stitch back on auth and user information
+        if getattr(request, '__from_api_client__', False):
+            if rv.auth is None:
+                rv.auth = getattr(request, 'auth', None)
+            if rv.user is None:
+                rv.user = getattr(request, 'user', None)
+        return rv
 
     @csrf_exempt
     def dispatch(self, request, *args, **kwargs):
@@ -218,8 +224,7 @@ class StatsMixin(object):
         resolution = request.GET.get('resolution')
         if resolution:
             resolution = self._parse_resolution(resolution)
-
-            assert any(r for r in tsdb.rollups if r[0] == resolution)
+            assert resolution in tsdb.rollups
 
         end = request.GET.get('until')
         if end:

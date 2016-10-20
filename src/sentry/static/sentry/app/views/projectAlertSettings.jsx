@@ -6,7 +6,7 @@ import IndicatorStore from '../stores/indicatorStore';
 import ListLink from '../components/listLink';
 import PluginConfig from '../components/pluginConfig';
 import {FormState, RangeField} from '../components/forms';
-import {t} from '../locale';
+import {t, tct} from '../locale';
 
 const ProjectDigestSettings = React.createClass({
   propTypes: {
@@ -101,7 +101,7 @@ const ProjectDigestSettings = React.createClass({
                   max={3600}
                   step={60}
                   defaultValue={300}
-                  label={t('Minimum delivery frequency')}
+                  label={t('Minimum delivery interval')}
                   help={t('Notifications will be delivered at most this often.')}
                   name="digestsMinDelay"
                   value={formData.digestsMinDelay}
@@ -115,7 +115,7 @@ const ProjectDigestSettings = React.createClass({
                   max={3600}
                   step={60}
                   defaultValue={3600}
-                  label={t('Maximum delivery frequency')}
+                  label={t('Maximum delivery interval')}
                   help={t('Notifications will be delivered at least this often.')}
                   name="digestsMaxDelay"
                   value={formData.digestsMaxDelay}
@@ -248,6 +248,17 @@ const ProjectAlertSettings = React.createClass({
                     index={true}>{t('Settings')}</ListLink>
           <ListLink to={`/${orgId}/${projectId}/settings/alerts/rules/`}>{t('Rules')}</ListLink>
         </ul>
+
+        <div className="alert alert-block alert-info">
+          {tct(
+            'These settings cover rule-based alerts. If you\'re ' +
+            'looking to change which notifications you receive ' +
+            'you may do so from your [link:account settings].',
+            {
+              link: <a href="/account/settings/notifications/" />
+            }
+          )}
+        </div>
 
         <ProjectDigestSettings
           orgId={orgId}

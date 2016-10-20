@@ -48,7 +48,7 @@ from sentry.utils.distutils import (
 )
 
 # The version of sentry
-VERSION = '8.9.0.dev0'
+VERSION = '8.10.0.dev0'
 
 # Hack to prevent stupid "TypeError: 'NoneType' object is not callable" error
 # in multiprocessing/util.py _exit_function when running `python
@@ -70,9 +70,13 @@ dev_requires = [
 ]
 
 tests_require = [
-    'blist',  # used by cassandra
+    # cassandra
+    'blist',
+    # TODO(dcramer): figure out why Travis needs this
+    'cassandra-driver<=3.5.0',
     'casscache',
     'cqlsh',
+    # /cassandra
     'datadog',
     'pytest-cov>=1.8.0,<1.9.0',
     'pytest-timeout>=0.5.0,<0.6.0',
@@ -106,6 +110,7 @@ install_requires = [
     'lxml>=3.4.1',
 
     'ipaddress>=1.0.16,<1.1.0',
+    'libsourcemap==0.4.0',
     'mock>=0.8.0,<1.1',
     'oauth2>=1.5.167',
     'percy>=0.2.5',
@@ -120,10 +125,10 @@ install_requires = [
     'python-memcached>=1.53,<2.0.0',
     'python-openid>=2.2',
     'PyYAML>=3.11,<3.12',
-    'raven>=5.21.0,<6.0.0',
+    'raven>=5.29.0,<6.0.0',
     'redis>=2.10.3,<2.11.0',
     'requests[security]>=2.9.1,<2.12.0',
-    'selenium>=2.53,<2.60',
+    'selenium==3.0.0b3',
     'simplejson>=3.2.0,<3.9.0',
     'six>=1.10.0,<1.11.0',
     'setproctitle>=1.1.7,<1.2.0',
@@ -131,7 +136,7 @@ install_requires = [
     'structlog==16.1.0',
     'South==1.0.1',
     'symsynd>=1.1.0,<2.0.0',
-    'toronado>=0.0.10,<0.1.0',
+    'toronado>=0.0.11,<0.1.0',
     'ua-parser>=0.6.1,<0.8.0',
     'urllib3>=1.14,<1.17',
     'uwsgi>2.0.0,<2.1.0',
@@ -188,9 +193,9 @@ setup(
     zip_safe=False,
     install_requires=install_requires,
     extras_require={
-        'tests': tests_require,
         'dev': dev_requires,
         'postgres': install_requires,
+        'tests': tests_require,
     },
     cmdclass=cmdclass,
     license='BSD',

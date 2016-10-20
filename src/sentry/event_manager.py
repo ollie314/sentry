@@ -847,7 +847,7 @@ class EventManager(object):
         is_regression = bool(Group.objects.filter(
             id=group.id,
             # ensure we cant update things if the status has been set to
-            # muted
+            # ignored
             status__in=[GroupStatus.RESOLVED, GroupStatus.UNRESOLVED],
         ).exclude(
             # add to the regression window to account for races here
@@ -897,7 +897,7 @@ class EventManager(object):
                     })
 
         if is_regression:
-            Activity.objects.create(
+            activity = Activity.objects.create(
                 project=group.project,
                 group=group,
                 type=Activity.SET_REGRESSION,
@@ -905,6 +905,7 @@ class EventManager(object):
                     'version': release.version if release else '',
                 }
             )
+            activity.send_notification()
 
         return is_regression
 

@@ -171,8 +171,8 @@ class GroupTransformer(Transformer):
         status = obj.get_status()
         if status == GroupStatus.RESOLVED:
             status_label = 'resolved'
-        elif status == GroupStatus.MUTED:
-            status_label = 'muted'
+        elif status == GroupStatus.IGNORED:
+            status_label = 'ignored'
         else:
             status_label = 'unresolved'
 
@@ -185,7 +185,7 @@ class GroupTransformer(Transformer):
             'id': six.text_type(obj.id),
             'count': six.text_type(obj.times_seen),
             'title': escape(obj.title),
-            'message': escape(obj.message_short),
+            'message': escape(obj.get_legacy_message()),
             'level': obj.level,
             'levelName': escape(obj.get_level_display()),
             'logger': escape(obj.logger),

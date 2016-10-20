@@ -20,7 +20,8 @@ class UserEmail(Model):
     user = FlexibleForeignKey(settings.AUTH_USER_MODEL,
                               related_name='emails')
     email = models.EmailField(_('email address'))
-    validation_hash = models.CharField(max_length=32)
+    validation_hash = models.CharField(
+        max_length=32, default=lambda: get_random_string(32, CHARACTERS))
     date_hash_added = models.DateTimeField(default=timezone.now)
     is_verified = models.BooleanField(
         _('verified'), default=False,
@@ -39,3 +40,10 @@ class UserEmail(Model):
 
     def hash_is_valid(self):
         return self.validation_hash and self.date_hash_added > timezone.now() - timedelta(hours=48)
+
+    @classmethod
+    def get_primary_email(self, user):
+        return UserEmail.objects.get_or_create(
+            user=user,
+            email=user.email,
+        )[0]

@@ -5,6 +5,7 @@ from __future__ import absolute_import
 import pytest
 import responses
 import six
+from libsourcemap import Token
 
 from mock import patch
 from requests.exceptions import RequestException
@@ -14,7 +15,6 @@ from sentry.lang.javascript.processor import (
     BadSource, discover_sourcemap, fetch_sourcemap, fetch_file, generate_module,
     SourceProcessor, trim_line, UrlResult, fetch_release_file
 )
-from sentry.lang.javascript.sourcemaps import SourceMap, SourceMapIndex
 from sentry.lang.javascript.errormapping import (
     rewrite_exception, REACT_MAPPING_URL
 )
@@ -247,13 +247,12 @@ class GenerateModuleTest(TestCase):
 
 class FetchBase64SourcemapTest(TestCase):
     def test_simple(self):
-        index = fetch_sourcemap(base64_sourcemap)
-        states = [SourceMap(1, 0, '/test.js', 0, 0, None)]
-        sources = set(['/test.js'])
-        keys = [(1, 0)]
-        content = {'/test.js': ['console.log("hello, World!")']}
+        smap_view = fetch_sourcemap(base64_sourcemap)
+        tokens = [Token(1, 0, '/test.js', 0, 0, 0, None)]
 
-        assert index == SourceMapIndex(states, keys, sources, content)
+        assert list(smap_view) == tokens
+        assert smap_view.get_source_contents(0) == 'console.log("hello, World!")'
+        assert smap_view.get_source_name(0) == u'/test.js'
 
 
 class TrimLineTest(TestCase):

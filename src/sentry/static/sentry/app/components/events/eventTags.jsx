@@ -29,8 +29,10 @@ const EventTags = React.createClass({
           group={this.props.group}
           event={this.props.event}
           title={t('Tags')}
-          type="tags">
-        <Pills>
+          type="tags"
+          className="p-b-1"
+          >
+        <Pills className="no-margin">
           {tags.map((tag) => {
             return (
               <Pill key={tag.key} name={tag.key}>

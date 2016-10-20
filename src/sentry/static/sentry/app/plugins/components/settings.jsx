@@ -7,6 +7,7 @@ import {
 } from '../../components/forms';
 import PluginComponentBase from '../../components/bases/pluginComponentBase';
 import LoadingIndicator from '../../components/loadingIndicator';
+import {tct} from '../../locale';
 
 
 class PluginSettings extends PluginComponentBase {
@@ -51,12 +52,14 @@ class PluginSettings extends PluginComponentBase {
       method: 'PUT',
       success: this.onSaveSuccess.bind(this, data => {
         let formData = {};
+        let initialData = {};
         data.config.forEach((field) => {
           formData[field.name] = field.value || field.defaultValue;
+          initialData[field.name] = field.value;
         });
         this.setState({
           formData: formData,
-          initialData: Object.assign({}, formData),
+          initialData: initialData,
           errors: {}
         });
       }),
@@ -73,13 +76,15 @@ class PluginSettings extends PluginComponentBase {
     this.api.request(this.getPluginEndpoint(), {
       success: data => {
         let formData = {};
+        let initialData = {};
         data.config.forEach((field) => {
           formData[field.name] = field.value || field.defaultValue;
+          initialData[field.name] = field.value;
         });
         this.setState({
           fieldList: data.config,
           formData: formData,
-          initialData: Object.assign({}, formData)
+          initialData: initialData
         // call this here to prevent FormState.READY from being
         // set before fieldList is
         }, this.onLoadSuccess);
@@ -94,6 +99,15 @@ class PluginSettings extends PluginComponentBase {
     }
     let isSaving = this.state.state === FormState.SAVING;
     let hasChanges = !underscore.isEqual(this.state.initialData, this.state.formData);
+    if (this.state.state === FormState.ERROR && !this.state.fieldList) {
+      return (
+        <div className="alert alert-error m-b-1">
+          {tct('An unknown error occurred. Need help with this? [link:Contact support]', {
+            link: <a href="https://sentry.io/support/"/>
+          })}
+        </div>
+      );
+    }
     return (
       <Form onSubmit={this.onSubmit} submitDisabled={isSaving || !hasChanges}>
         {this.state.errors.__all__ &&
